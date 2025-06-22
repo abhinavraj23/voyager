@@ -21,18 +21,16 @@ def get_clickhouse_client() -> Client:
 def create_clickhouse_client() -> Client:
     """Create a new ClickHouse client"""
     try:
-        is_secure = settings.clickhouse_secure
+        logger.info(f"Attempting to connect to ClickHouse at {settings.clickhouse_host}:{settings.clickhouse_port}...")
         client = Client(
             host=settings.clickhouse_host,
-            port=settings.clickhouse_port if not is_secure else 9440,
+            port=settings.clickhouse_port,
             user=settings.clickhouse_user,
             password=settings.clickhouse_password,
             database=settings.clickhouse_db,
-            secure=is_secure,
+            secure=True, # Always use secure connection for ClickHouse Cloud
             settings={
-                'max_execution_time': 30,
-                'max_block_size': 10000,
-                'max_threads': 4
+                'max_execution_time': 30
             }
         )
         

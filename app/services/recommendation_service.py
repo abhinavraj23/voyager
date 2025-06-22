@@ -7,7 +7,7 @@ import openai
 from app.config import settings
 from app.models.recommendation import RecommendationRequest, PopularToursRequest, SmartRecommendationRequest, RecommendedTour
 from app.services.weather_service import WeatherService
-from app.services.inventory_service import InventoryService
+# from app.services.inventory_service import InventoryService
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +17,8 @@ class RecommendationService:
     def __init__(self, client: Client):
         self.client = client
         self.weather_service = WeatherService()
-        self.inventory_service = InventoryService()
-        self.openai_client = openai.OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
+        # self.inventory_service = InventoryService()
+        self.openai_client = openai.AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key else None
     
     def get_recommendations(self, request: RecommendationRequest) -> Dict[str, Any]:
         """Get personalized tour recommendations"""
@@ -298,94 +298,84 @@ class RecommendationService:
     def _get_candidate_tours(self, request: SmartRecommendationRequest, context: dict) -> List[int]:
         """
         Applies a hierarchical set of filters to find relevant tours.
-        If a filter layer returns no results, it falls back to the previous layer's results.
+        Builds a single query with all conditions.
         """
-        base_query = "SELECT id FROM tour_info"
-        
-        # Define filter layers in order of importance
-        filter_layers = []
+        query = "SELECT id FROM tour_info WHERE 1=1"
+        params = {}
 
-        # Layer 1: Geo-location (hard constraint, if lat/lon are provided)
+        # Layer 1: Geo-location
         if request.lat is not None and request.lon is not None:
-            filter_layers.append(
-                {"clause": f"({self._build_distance_query(request.lat, request.lon, 20)})", "params": []}
-            )
+            query += f" AND ({self._build_distance_query(request.lat, request.lon, 20)})"
         
-        # Layer 2: Weather compatibility (if weather data is available)
+        # Layer 2: Weather compatibility
         if context.get('weather'):
-            filter_layers.append(
-                {"clause": self._get_weather_filter(context['weather']['condition']), "params": []}
-            )
+            weather_filter = self._get_weather_filter(context['weather']['condition'])
+            if weather_filter:
+                query += f" AND {weather_filter}"
         
-        # Layer 3: Time of Day and Season
-        filter_layers.append({"clause": "has(time_of_day_trip_type, %s)", "params": [context['time_of_day']]})
+        # Layer 3: Time of Day
+        query += " AND has(time_of_day_trip_type, %(time_of_day)s)"
+        params['time_of_day'] = context['time_of_day']
         
         # Layer 4: Explicit User Preferences
-        filter_layers.append({"clause": self._get_preferences_filter(request.preferences), "params": self._get_preferences_params(request.preferences)})
-        
-        # Layer 5: Disliked Tours (final exclusion)
-        filter_layers.append({"clause": self._get_feedback_filter(request.feedback), "params": self._get_feedback_params(request.feedback)})
-        
-
-        candidate_ids = None
-        last_successful_ids = []
-        
-        query_conditions = []
-
-        for layer in filter_layers:
-            if not layer["clause"]:
-                continue
-
-            current_conditions = query_conditions + [layer["clause"]]
-            current_params = []
-            for l in filter_layers[:len(query_conditions) + 1]:
-                current_params.extend(l["params"])
-
+        prefs_filter = self._get_preferences_filter(request.preferences)
+        if prefs_filter:
+            query += f" AND ({prefs_filter})"
+            params.update(self._get_preferences_params(request.preferences))
             
-            full_query = f"{base_query} WHERE {' AND '.join(current_conditions)}"
-            
-            try:
-                result = self.client.execute(full_query, current_params)
-                if result:
-                    last_successful_ids = [row[0] for row in result]
-                    query_conditions.append(layer["clause"]) # Commit the layer if successful
-                else:
-                    # Fallback: The last set of IDs was the best we could do
-                    break
-            except Exception as e:
-                logger.error(f"Error executing filter layer query: {e}")
-                break # Stop processing if a query fails
+        # Layer 5: Disliked Tours
+        feedback_filter = self._get_feedback_filter(request.feedback)
+        if feedback_filter:
+            query += f" AND {feedback_filter}"
+            params.update(self._get_feedback_params(request.feedback))
+        
+        logger.debug(f"Executing candidate query: {query}")
+        logger.debug(f"With params: {params}")
 
-        return last_successful_ids
+        try:
+            result = self.client.execute(query, params)
+            if result:
+                candidate_ids = [row[0] for row in result]
+                logger.info(f"Found {len(candidate_ids)} candidate tours.")
+                return candidate_ids
+            else:
+                logger.info("No candidate tours found for the given criteria.")
+                return []
+        except Exception as e:
+            logger.error(f"Error executing candidate query: {e}", exc_info=True)
+            return []
 
     async def _rank_and_select_tours(self, tour_ids: List[int], request: SmartRecommendationRequest) -> List[Dict]:
         """Ranks tours based on similarity to liked tours, inventory, and other heuristics."""
         
-        # Check for tour group availability in the next 2 days.
-        # Since tourId from tour_info is tourGroupId, we can check their inventory directly.
-        available_tour_group_ids = await self.inventory_service.get_available_tour_groups(tour_ids, days=2)
+        # # Check for tour group availability in the next 2 days.
+        # # Since tourId from tour_info is tourGroupId, we can check their inventory directly.
+        # available_tour_group_ids = await self.inventory_service.get_available_tour_groups(tour_ids, days=2)
 
         # Base query to fetch full tour details
-        query = "SELECT * FROM tour_info WHERE id IN %s"
-        params = [tuple(tour_ids)]
+        query = "SELECT * FROM tour_info WHERE id IN %(tour_ids)s"
+        params: Dict[str, Any] = {'tour_ids': tuple(tour_ids)}
 
         # Scoring based on liked tours
         order_by_clauses = []
         
-        # Inventory scoring: give a high score to tour groups available soon.
-        if available_tour_group_ids:
-            order_by_clauses.append("multiIf(id IN %s, 20, 0)")
-            params.append(tuple(available_tour_group_ids))
+        # # Inventory scoring: give a high score to tour groups available soon.
+        # if available_tour_group_ids:
+        #     order_by_clauses.append("multiIf(id IN %(available_ids)s, 20, 0)")
+        #     params['available_ids'] = tuple(available_tour_group_ids)
             
         if request.feedback and request.feedback.liked_tours:
             # Fetch categories of liked tours to find similar ones
-            liked_cats_query = "SELECT DISTINCT category_name FROM tour_info WHERE id IN %s"
-            liked_cats = [row[0] for row in self.client.execute(liked_cats_query, [tuple(request.feedback.liked_tours)])]
+            liked_cats_query = "SELECT DISTINCT category_name FROM tour_info WHERE id IN %(liked_tours)s"
+            liked_cats_params = {'liked_tours': tuple(request.feedback.liked_tours)}
+            
+            liked_cats_result = self.client.execute(liked_cats_query, liked_cats_params)
+            liked_cats = [row[0] for row in liked_cats_result]
             
             if liked_cats:
                 # Boost tours in the same category as liked tours
-                order_by_clauses.append("multiIf(category_name IN %s, 10, 0)")
-                params.append(tuple(liked_cats))
+                order_by_clauses.append("multiIf(category_name IN %(liked_cats)s, 10, 0)")
+                params['liked_cats'] = tuple(liked_cats)
 
         # Default ordering
         order_by_clauses.append("id")
@@ -399,8 +389,8 @@ class RecommendationService:
             # Fallback to just sorting by id if no other criteria match
             query += " ORDER BY id"
             
-        query += " LIMIT %s"
-        params.append(request.limit)
+        query += " LIMIT %(limit)s"
+        params['limit'] = request.limit
         
         result = self.client.execute(query, params, with_column_types=True)
         columns = [col[0] for col in result[1]]
@@ -416,28 +406,28 @@ class RecommendationService:
     def _get_preferences_filter(self, prefs) -> Optional[str]:
         if not prefs: return None
         clauses = []
-        if prefs.tour_type: clauses.append("tour_type = %s")
-        if prefs.category: clauses.append("category_name = %s")
-        if prefs.price_range: clauses.append("pricing_range_usd = %s")
+        if prefs.tour_type: clauses.append("tour_type = %(tour_type)s")
+        if prefs.category: clauses.append("category_name = %(category)s")
+        if prefs.price_range: clauses.append("pricing_range_usd = %(price_range)s")
         return " AND ".join(clauses) if clauses else None
 
-    def _get_preferences_params(self, prefs) -> list:
-        if not prefs: return []
-        params = []
-        if prefs.tour_type: params.append(prefs.tour_type.value)
-        if prefs.category: params.append(prefs.category)
-        if prefs.price_range: params.append(prefs.price_range.value)
+    def _get_preferences_params(self, prefs) -> dict:
+        if not prefs: return {}
+        params = {}
+        if prefs.tour_type: params['tour_type'] = prefs.tour_type.value
+        if prefs.category: params['category'] = prefs.category
+        if prefs.price_range: params['price_range'] = prefs.price_range.value
         return params
 
     def _get_feedback_filter(self, feedback) -> Optional[str]:
         if feedback and feedback.disliked_tours:
-            return "id NOT IN %s"
+            return "id NOT IN %(disliked_tours)s"
         return None
 
-    def _get_feedback_params(self, feedback) -> list:
+    def _get_feedback_params(self, feedback) -> dict:
         if feedback and feedback.disliked_tours:
-            return [tuple(feedback.disliked_tours)]
-        return []
+            return {'disliked_tours': tuple(feedback.disliked_tours)}
+        return {}
 
     async def _derive_context(self, request: SmartRecommendationRequest) -> dict:
         """Fetches weather and derives time-based context."""

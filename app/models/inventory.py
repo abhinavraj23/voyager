@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import List, Dict
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Dict, Optional, Any
 from datetime import date
 
 class DateAvailability(BaseModel):
@@ -12,9 +12,16 @@ class DateAvailability(BaseModel):
     discount_available: bool = Field(..., alias='discountAvailable')
 
 class CalendarMetadata(BaseModel):
-    start_date: date = Field(..., alias='startDate')
-    end_date: date = Field(..., alias='endDate')
+    start_date: Optional[date] = Field(None, alias='startDate')
+    end_date: Optional[date] = Field(None, alias='endDate')
     currency: str
+
+    @field_validator('start_date', 'end_date', mode='before')
+    @classmethod
+    def empty_str_to_none(cls, v: Any) -> Optional[Any]:
+        if isinstance(v, str) and v.strip() == '':
+            return None
+        return v
 
 class CalendarResponse(BaseModel):
     dates: Dict[date, DateAvailability]

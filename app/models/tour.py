@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Optional, Any
 from enum import Enum
 
 class TourType(str, Enum):
@@ -25,11 +25,11 @@ class GroupType(str, Enum):
     COUPLES = "couples"
 
 class PricingRange(str, Enum):
-    LOW = "0 - 50 USD"
-    MEDIUM = "50 - 100 USD"
-    HIGH = "100 - 200 USD"
-    PREMIUM = "200 - 500 USD"
-    LUXURY = "500+ USD"
+    LOW = "0-50 USD"
+    MEDIUM = "50-100 USD"
+    HIGH = "100-200 USD"
+    VERY_HIGH = "200-500 USD"
+    PREMIUM = "500+ USD"
 
 class TourBase(BaseModel):
     """Base tour model"""
@@ -44,6 +44,13 @@ class TourBase(BaseModel):
     tour_type: TourType = Field(..., description="Type of tour")
     season: List[Season] = Field(..., description="Best seasons to visit")
     group_type_suitability: List[GroupType] = Field(..., description="Suitable group types")
+
+    @field_validator('pricing_range_usd', mode='before')
+    @classmethod
+    def normalize_pricing_range(cls, v: Any) -> Optional[Any]:
+        if isinstance(v, str):
+            return v.replace(' - ', '-')
+        return v
 
 class TourResponse(TourBase):
     """Tour response model"""

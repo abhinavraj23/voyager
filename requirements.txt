@@ -1,0 +1,13 @@
+requests
+flatten_json
+openai
+python-dotenv
+clickhouse-driver
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-multipart
+httpx
+tiktoken
+tqdm

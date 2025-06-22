@@ -273,6 +273,7 @@ class RecommendationService:
         
         # 2. Apply filters sequentially to find candidate tours
         candidate_ids = self._get_candidate_tours(request, context)
+        print(f"Candidate IDs: {candidate_ids}")
 
         if not candidate_ids:
             return {
@@ -297,53 +298,96 @@ class RecommendationService:
 
     def _get_candidate_tours(self, request: SmartRecommendationRequest, context: dict) -> List[int]:
         """
-        Applies a hierarchical set of filters to find relevant tours.
-        Builds a single query with all conditions.
+        Applies a hierarchical set of filters to find relevant tours using a
+        multi-layered fallback strategy.
         """
-        query = "SELECT id FROM tour_info WHERE 1=1"
-        params = {}
-
-        # Layer 1: Geo-location
-        if request.lat is not None and request.lon is not None:
-            query += f" AND ({self._build_distance_query(request.lat, request.lon, 20)})"
+        base_query = "SELECT id FROM tour_info WHERE 1=1"
         
-        # Layer 2: Weather compatibility
+        # --- Query 1: Strict search with all filters and 20km radius ---
+        logger.info("Attempt 1: Strict search with all filters and 20km radius.")
+        conditions_1 = []
+        params_1: Dict[str, Any] = {}
+
+        if request.lat is not None and request.lon is not None:
+            conditions_1.append(f"({self._build_distance_query(request.lat, request.lon, 20)})")
+        
         if context.get('weather'):
             weather_filter = self._get_weather_filter(context['weather']['condition'])
             if weather_filter:
-                query += f" AND {weather_filter}"
+                conditions_1.append(weather_filter)
         
-        # Layer 3: Time of Day
-        query += " AND has(time_of_day_trip_type, %(time_of_day)s)"
-        params['time_of_day'] = context['time_of_day']
+        conditions_1.append("has(time_of_day_trip_type, %(time_of_day)s)")
+        params_1['time_of_day'] = context['time_of_day']
         
-        # Layer 4: Explicit User Preferences
         prefs_filter = self._get_preferences_filter(request.preferences)
         if prefs_filter:
-            query += f" AND ({prefs_filter})"
-            params.update(self._get_preferences_params(request.preferences))
+            conditions_1.append(f"({prefs_filter})")
+            params_1.update(self._get_preferences_params(request.preferences))
             
-        # Layer 5: Disliked Tours
         feedback_filter = self._get_feedback_filter(request.feedback)
         if feedback_filter:
-            query += f" AND {feedback_filter}"
-            params.update(self._get_feedback_params(request.feedback))
-        
-        logger.debug(f"Executing candidate query: {query}")
-        logger.debug(f"With params: {params}")
+            conditions_1.append(feedback_filter)
+            params_1.update(self._get_feedback_params(request.feedback))
 
         try:
-            result = self.client.execute(query, params)
-            if result:
-                candidate_ids = [row[0] for row in result]
-                logger.info(f"Found {len(candidate_ids)} candidate tours.")
-                return candidate_ids
-            else:
-                logger.info("No candidate tours found for the given criteria.")
-                return []
+            query_1 = f"{base_query} AND {' AND '.join(conditions_1)}"
+            logger.info(f"Executing query 1: {query_1} with params: {params_1}")
+            result_1 = self.client.execute(query_1, params_1)
+            if result_1:
+                logger.info(f"Success on attempt 1. Found {len(result_1)} tours.")
+                return [row[0] for row in result_1]
         except Exception as e:
-            logger.error(f"Error executing candidate query: {e}", exc_info=True)
-            return []
+            logger.error(f"Error on attempt 1: {e}", exc_info=True)
+
+        # --- Query 2: Fallback with 100km radius and other filters ---
+        logger.info("Attempt 2: Fallback with 100km radius.")
+        if request.lat is not None and request.lon is not None:
+            conditions_2 = []
+            params_2: Dict[str, Any] = {}
+
+            conditions_2.append(f"({self._build_distance_query(request.lat, request.lon, 100)})")
+            
+            if context.get('weather'):
+                weather_filter = self._get_weather_filter(context['weather']['condition'])
+                if weather_filter:
+                    conditions_2.append(weather_filter)
+            
+            conditions_2.append("has(time_of_day_trip_type, %(time_of_day)s)")
+            params_2['time_of_day'] = context['time_of_day']
+
+            if prefs_filter:
+                conditions_2.append(f"({prefs_filter})")
+                params_2.update(self._get_preferences_params(request.preferences))
+
+            if feedback_filter:
+                conditions_2.append(feedback_filter)
+                params_2.update(self._get_feedback_params(request.feedback))
+
+            try:
+                query_2 = f"{base_query} AND {' AND '.join(conditions_2)}"
+                logger.info(f"Executing query 2: {query_2} with params: {params_2}")
+                result_2 = self.client.execute(query_2, params_2)
+                if result_2:
+                    logger.info(f"Success on attempt 2. Found {len(result_2)} tours.")
+                    return [row[0] for row in result_2]
+            except Exception as e:
+                logger.error(f"Error on attempt 2: {e}", exc_info=True)
+
+        # --- Query 3: Final fallback with just 20km radius ---
+        logger.info("Attempt 3: Final fallback with 20km radius only.")
+        if request.lat is not None and request.lon is not None:
+            try:
+                query_3 = f"{base_query} AND ({self._build_distance_query(request.lat, request.lon, 20)})"
+                logger.info(f"Executing query 3: {query_3}")
+                result_3 = self.client.execute(query_3)
+                if result_3:
+                    logger.info(f"Success on attempt 3. Found {len(result_3)} tours.")
+                    return [row[0] for row in result_3]
+            except Exception as e:
+                logger.error(f"Error on attempt 3: {e}", exc_info=True)
+        
+        logger.info("All attempts failed. No tours found.")
+        return []
 
     async def _rank_and_select_tours(self, tour_ids: List[int], request: SmartRecommendationRequest) -> List[Dict]:
         """Ranks tours based on similarity to liked tours, inventory, and other heuristics."""

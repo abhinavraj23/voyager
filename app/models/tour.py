@@ -52,6 +52,14 @@ class TourBase(BaseModel):
             return v.replace(' - ', '-')
         return v
 
+    @field_validator('group_type_suitability', 'season', 'time_of_day_trip_type', mode='before')
+    @classmethod
+    def clean_string_list_field(cls, v: Any) -> Any:
+        if isinstance(v, list):
+            # This handles cases like ["'solo'", 'family']
+            return [s.strip().strip("'\"") for s in v if isinstance(s, str)]
+        return v
+
 class TourResponse(TourBase):
     """Tour response model"""
     pass

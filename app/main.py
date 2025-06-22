@@ -5,10 +5,18 @@ import uvicorn
 from contextlib import asynccontextmanager
 import os
 import dotenv
+import logging
 
 from app.repository.database import get_clickhouse_client
 from app.routers import recommendations, tours
 from app.config import settings
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
 
 # Load environment variables
 dotenv.load_dotenv()

@@ -390,61 +390,23 @@ class RecommendationService:
         return []
 
     async def _rank_and_select_tours(self, tour_ids: List[int], request: SmartRecommendationRequest) -> List[Dict]:
-        """Ranks tours based on similarity to liked tours, inventory, and other heuristics."""
+        """
+        Randomly selects a subset of tours from the candidate list to introduce
+        an element of discovery and surprise.
+        """
+        if not tour_ids:
+            return []
+
+        # Build a query to fetch the full details for the candidate tours,
+        # ordering them randomly and limiting the result.
+        query = "SELECT * FROM tour_info WHERE id IN %(tour_ids)s ORDER BY rand() LIMIT %(limit)s"
         
-        # # Check for tour group availability in the next 2 days.
-        # # Since tourId from tour_info is tourGroupId, we can check their inventory directly.
-        # available_tour_group_ids = await self.inventory_service.get_available_tour_groups(tour_ids, days=2)
+        params: Dict[str, Any] = {
+            'tour_ids': tuple(tour_ids),
+            'limit': request.limit
+        }
 
-        # Base query to fetch full tour details
-        select_clause = "SELECT *"
-        params: Dict[str, Any] = {'tour_ids': tuple(tour_ids)}
-
-        if request.lat is not None and request.lon is not None:
-            select_clause += ", geoDistance(%(lon)s, %(lat)s, long, lat) AS distance"
-            params['lat'] = request.lat
-            params['lon'] = request.lon
-
-        query = f"{select_clause} FROM tour_info WHERE id IN %(tour_ids)s"
-        
-        # Scoring based on liked tours
-        order_by_clauses = []
-        
-        # # Inventory scoring: give a high score to tour groups available soon.
-        # if available_tour_group_ids:
-        #     order_by_clauses.append("multiIf(id IN %(available_ids)s, 20, 0)")
-        #     params['available_ids'] = tuple(available_tour_group_ids)
-            
-        if request.feedback and request.feedback.liked_tours:
-            # Fetch categories of liked tours to find similar ones
-            liked_cats_query = "SELECT DISTINCT category_name FROM tour_info WHERE id IN %(liked_tours)s"
-            liked_cats_params = {'liked_tours': tuple(request.feedback.liked_tours)}
-            
-            liked_cats_result = self.client.execute(liked_cats_query, liked_cats_params)
-            liked_cats = [row[0] for row in liked_cats_result]
-            
-            if liked_cats:
-                # Boost tours in the same category as liked tours
-                order_by_clauses.append("multiIf(category_name IN %(liked_cats)s, 10, 0)")
-                params['liked_cats'] = tuple(liked_cats)
-
-        # Build ORDER BY clause
-        final_order_by = []
-        if len(order_by_clauses) > 0:
-            scoring_expression = " + ".join(order_by_clauses)
-            final_order_by.append(f"({scoring_expression}) DESC")
-
-        if request.lat is not None and request.lon is not None:
-            final_order_by.append("distance ASC")
-
-        # Add a fallback for stable sorting
-        final_order_by.append("id ASC")
-        
-        query += f" ORDER BY {', '.join(final_order_by)}"
-        query += " LIMIT %(limit)s"
-        params['limit'] = request.limit
-        
-        logger.info(f"Executing ranking query: {query}")
+        logger.info(f"Executing random selection query: {query}")
         logger.info(f"With params: {params}")
 
         result = self.client.execute(query, params, with_column_types=True)

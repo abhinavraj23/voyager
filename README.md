@@ -28,11 +28,19 @@ This endpoint provides a simple, RESTful way to get smart recommendations using 
 **Example Request (`curl`):**
 
 ```bash
-curl -G "http://localhost:8000/api/v1/recommendations/smart" \
-  --data-urlencode "lat=40.7128" \
-  --data-urlencode "lon=-74.0060" \
-  --data-urlencode "tour_type=outdoor" \
-  --data-urlencode "limit=5"
+curl -X 'POST' \
+  'http://localhost:8000/api/v1/recommendations/smart' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "lat": 40.7128,
+  "lon": -74.0060,
+  "preferences": {
+    "tour_type": "outdoor",
+    "category": "Adventure"
+  },
+  "limit": 5
+}'
 ```
 
 ---

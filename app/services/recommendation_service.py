@@ -397,9 +397,16 @@ class RecommendationService:
         # available_tour_group_ids = await self.inventory_service.get_available_tour_groups(tour_ids, days=2)
 
         # Base query to fetch full tour details
-        query = "SELECT * FROM tour_info WHERE id IN %(tour_ids)s"
+        select_clause = "SELECT *"
         params: Dict[str, Any] = {'tour_ids': tuple(tour_ids)}
 
+        if request.lat is not None and request.lon is not None:
+            select_clause += ", geoDistance(%(lon)s, %(lat)s, long, lat) AS distance"
+            params['lat'] = request.lat
+            params['lon'] = request.lon
+
+        query = f"{select_clause} FROM tour_info WHERE id IN %(tour_ids)s"
+        
         # Scoring based on liked tours
         order_by_clauses = []
         
@@ -421,21 +428,25 @@ class RecommendationService:
                 order_by_clauses.append("multiIf(category_name IN %(liked_cats)s, 10, 0)")
                 params['liked_cats'] = tuple(liked_cats)
 
-        # Default ordering
-        order_by_clauses.append("id")
+        # Build ORDER BY clause
+        final_order_by = []
+        if len(order_by_clauses) > 0:
+            scoring_expression = " + ".join(order_by_clauses)
+            final_order_by.append(f"({scoring_expression}) DESC")
+
+        if request.lat is not None and request.lon is not None:
+            final_order_by.append("distance ASC")
+
+        # Add a fallback for stable sorting
+        final_order_by.append("id ASC")
         
-        if len(order_by_clauses) > 1:
-            # We construct a scoring expression by adding up the scores from different rules.
-            # The 'id' is a small factor to ensure stable sorting.
-            scoring_expression = " + ".join(order_by_clauses[:-1])
-            query += f" ORDER BY ({scoring_expression}) DESC, id"
-        else:
-            # Fallback to just sorting by id if no other criteria match
-            query += " ORDER BY id"
-            
+        query += f" ORDER BY {', '.join(final_order_by)}"
         query += " LIMIT %(limit)s"
         params['limit'] = request.limit
         
+        logger.info(f"Executing ranking query: {query}")
+        logger.info(f"With params: {params}")
+
         result = self.client.execute(query, params, with_column_types=True)
         columns = [col[0] for col in result[1]]
         return [dict(zip(columns, row)) for row in result[0]]

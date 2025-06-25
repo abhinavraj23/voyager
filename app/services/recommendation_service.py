@@ -559,7 +559,7 @@ class RecommendationService:
         user_context_str = "\n".join(user_context_parts)
 
         prompt = f"""
-        A user is looking for a tour recommendation. Based on their context and the tour details, provide a short, friendly, and compelling reason (1-2 sentences) why this specific tour is being recommended to them.
+        Generate a very short, compelling reason (maximum 2 lines, ideally 1-2 sentences) why this tour is recommended for the user.
 
         User's Context:
         {user_context_str}
@@ -571,8 +571,13 @@ class RecommendationService:
         - Price Range: {tour['pricing_range_usd']}
         - Summary: Best for {', '.join(tour['group_type_suitability'])} during {', '.join(tour['time_of_day_trip_type'])}.
 
-        Generate only the recommendation text, without any preamble.
-        Example: "Since it's a sunny afternoon, this highly-rated outdoor tour is a perfect match and it's just a short distance from you!"
+        Requirements:
+        - Keep it to maximum 2 lines
+        - Be concise and direct
+        - Focus on the most relevant factor (weather, location, time, or preferences)
+        - Make it personal and engaging
+
+        Example: "Perfect for this sunny afternoon! This outdoor tour is just minutes away and matches your preferences."
         """
         
         try:
@@ -580,7 +585,7 @@ class RecommendationService:
                 messages=[{"role": "user", "content": prompt}],
                 model="gpt-4.1-mini",
                 temperature=0.7,
-                max_tokens=100,
+                max_tokens=80,
             )
             reason = chat_completion.choices[0].message.content.strip()
             return reason

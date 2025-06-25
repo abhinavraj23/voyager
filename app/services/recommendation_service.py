@@ -453,8 +453,8 @@ class RecommendationService:
 
     async def _rank_and_select_tours(self, tour_ids: List[int], request: SmartRecommendationRequest) -> List[Dict]:
         """
-        Ranks and selects tours based on multiple factors including preferences,
-        weather, location, and user feedback.
+        Ranks tours based on multiple factors, gets top 3, then randomly selects from them
+        to add variety while maintaining quality.
         """
         if not tour_ids:
             return []
@@ -484,11 +484,19 @@ class RecommendationService:
             score = self._calculate_tour_score(tour, request)
             ranked_tours.append((tour, score))
         
-        # Sort by score (highest first) and take top results
+        # Sort by score (highest first)
         ranked_tours.sort(key=lambda x: x[1], reverse=True)
-        selected_tours = [tour for tour, score in ranked_tours[:request.limit]]
         
-        logger.info(f"Ranked {len(tours)} tours, selected top {len(selected_tours)}")
+        # Get top 3 ranked tours
+        top_5_tours = [tour for tour, score in ranked_tours[:5]]
+        
+        logger.info(f"Ranked {len(tours)} tours, top 3 scores: {[score for _, score in ranked_tours[:3]]}")
+        
+        # Randomly select from top 3 to add variety
+        import random
+        selected_tours = random.sample(top_5_tours, min(len(top_5_tours), request.limit))
+        
+        logger.info(f"Randomly selected {len(selected_tours)} tours from top 3 ranked tours")
         return selected_tours
 
     def _calculate_tour_score(self, tour: Dict, request: SmartRecommendationRequest) -> float:

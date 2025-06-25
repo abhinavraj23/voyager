@@ -11,3 +11,4 @@ python-multipart
 httpx
 tiktoken
 tqdm
+redis

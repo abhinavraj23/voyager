@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     # Weather API settings
     weather_api_key: Optional[str] = None
     
+    # Caching settings
+    cache_type: str = "memory"  # "memory" or "redis"
+    redis_url: Optional[str] = None
+    cache_ttl: int = 3600  # Cache TTL in seconds (1 hour)
+    openai_cache_ttl: int = 1800  # OpenAI responses cache TTL (30 minutes)
+    
     # API settings
     api_prefix: str = "/api/v1"
     

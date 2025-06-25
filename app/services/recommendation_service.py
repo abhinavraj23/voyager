@@ -7,9 +7,67 @@ import openai
 from app.config import settings
 from app.models.recommendation import RecommendationRequest, PopularToursRequest, SmartRecommendationRequest, RecommendedTour
 from app.services.weather_service import WeatherService
+from app.utils.cache import cached
 # from app.services.inventory_service import InventoryService
 
 logger = logging.getLogger(__name__)
+
+@cached(ttl=1800, key_prefix="openai_recommendation_reason")
+async def _generate_recommendation_reason_cached(tour: dict, request_data: dict, context: dict, openai_api_key: str) -> str:
+    """Cached function for generating recommendation reasons"""
+    if not openai_api_key:
+        return "Recommended based on your preferences and current context."
+
+    openai_client = openai.AsyncOpenAI(api_key=openai_api_key)
+    
+    user_context_parts = []
+    if request_data.get('lat') is not None and request_data.get('lon') is not None:
+        user_context_parts.append(f"- Location: Near latitude {request_data['lat']}, longitude {request_data['lon']}")
+    
+    user_context_parts.append(f"- Time: It's currently {context['time_of_day']} on {request_data['local_datetime']}.")
+
+    if context.get('weather'):
+        user_context_parts.append(f"- Weather: The weather is {context['weather']['condition']} at {context['weather']['temperature_celsius']}°C.")
+
+    if request_data.get('preferences'):
+        user_context_parts.append(f"- Preferences: {request_data['preferences']}.")
+
+    user_context_str = "\n".join(user_context_parts)
+
+    prompt = f"""
+    Generate a very short, compelling reason (maximum 2 lines, ideally 1-2 sentences) why this tour is recommended for the user.
+
+    User's Context:
+    {user_context_str}
+
+    Tour Details:
+    - Name: {tour['name']}
+    - Category: {tour['category_name']}
+    - Type: {tour['tour_type']}
+    - Price Range: {tour['pricing_range_usd']}
+    - Summary: Best for {', '.join(tour['group_type_suitability'])} during {', '.join(tour['time_of_day_trip_type'])}.
+
+    Requirements:
+    - Keep it to maximum 2 lines
+    - Be concise and direct
+    - Focus on the most relevant factor (weather, location, time, or preferences)
+    - Make it personal and engaging
+
+    Example: "Perfect for this sunny afternoon! This outdoor tour is just minutes away and matches your preferences."
+    """
+    
+    try:
+        chat_completion = await openai_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="gpt-4.1-mini",
+            temperature=0.7,
+            max_tokens=80,
+        )
+        reason = chat_completion.choices[0].message.content.strip()
+        return reason
+    except Exception as e:
+        logger.error(f"Error generating recommendation reason from OpenAI: {e}")
+        return "This tour is a great fit based on your location and preferences."
 
 class RecommendationService:
     """Service class for recommendation-related operations"""
@@ -282,6 +340,10 @@ class RecommendationService:
             }
 
         # 3. Rank the candidates and select the best ones
+        # Pass weather context to the request for use in scoring
+        if context.get('weather'):
+            request._weather_context = context['weather']
+        
         final_tours = await self._rank_and_select_tours(candidate_ids, request)
 
         # 4. Generate personalized explanations for the final recommendations
@@ -391,27 +453,190 @@ class RecommendationService:
 
     async def _rank_and_select_tours(self, tour_ids: List[int], request: SmartRecommendationRequest) -> List[Dict]:
         """
-        Randomly selects a subset of tours from the candidate list to introduce
-        an element of discovery and surprise.
+        Ranks and selects tours based on multiple factors including preferences,
+        weather, location, and user feedback.
         """
         if not tour_ids:
             return []
 
-        # Build a query to fetch the full details for the candidate tours,
-        # ordering them randomly and limiting the result.
-        query = "SELECT * FROM tour_info WHERE id IN %(tour_ids)s ORDER BY rand() LIMIT %(limit)s"
+        # Build a query to fetch the full details for the candidate tours
+        query = """
+            SELECT *, 
+                   geoDistance(%(lon)s, %(lat)s, long, lat) as distance_meters
+            FROM tour_info 
+            WHERE id IN %(tour_ids)s
+        """
         
         params: Dict[str, Any] = {
             'tour_ids': tuple(tour_ids),
-            'limit': request.limit
+            'lat': request.lat or 0,
+            'lon': request.lon or 0
         }
 
-        logger.info(f"Executing random selection query: {query}")
-        logger.info(f"With params: {params}")
-
+        logger.info(f"Executing ranking query for {len(tour_ids)} tours")
         result = self.client.execute(query, params, with_column_types=True)
         columns = [col[0] for col in result[1]]
-        return [dict(zip(columns, row)) for row in result[0]]
+        tours = [dict(zip(columns, row)) for row in result[0]]
+
+        # Rank tours based on multiple factors
+        ranked_tours = []
+        for tour in tours:
+            score = self._calculate_tour_score(tour, request)
+            ranked_tours.append((tour, score))
+        
+        # Sort by score (highest first) and take top results
+        ranked_tours.sort(key=lambda x: x[1], reverse=True)
+        selected_tours = [tour for tour, score in ranked_tours[:request.limit]]
+        
+        logger.info(f"Ranked {len(tours)} tours, selected top {len(selected_tours)}")
+        return selected_tours
+
+    def _calculate_tour_score(self, tour: Dict, request: SmartRecommendationRequest) -> float:
+        """
+        Calculate a comprehensive score for a tour based on multiple factors.
+        Returns a score between 0 and 100.
+        """
+        score = 0.0
+        
+        # 1. Location/Distance Score (0-25 points)
+        if request.lat is not None and request.lon is not None and 'distance_meters' in tour:
+            distance_km = tour['distance_meters'] / 1000
+            if distance_km <= 5:
+                score += 25  # Very close
+            elif distance_km <= 10:
+                score += 20  # Close
+            elif distance_km <= 20:
+                score += 15  # Moderate distance
+            elif distance_km <= 50:
+                score += 10  # Far but acceptable
+            else:
+                score += 5   # Very far
+        
+        # 2. Preference Matching Score (0-30 points)
+        if request.preferences:
+            # Tour type preference
+            if request.preferences.tour_type and tour['tour_type'] == request.preferences.tour_type.value:
+                score += 10
+            
+            # Category preference
+            if request.preferences.category and tour['category_name'] == request.preferences.category:
+                score += 10
+            
+            # Price range preference
+            if request.preferences.price_range and tour['pricing_range_usd'] == request.preferences.price_range.value:
+                score += 10
+        
+        # 3. Weather Compatibility Score (0-15 points)
+        # Get weather context from the request context (will be passed from get_smart_recommendations)
+        weather_score = self._get_weather_compatibility_score(tour, request)
+        score += weather_score
+        
+        # 4. Time of Day Compatibility Score (0-15 points)
+        time_score = self._get_time_compatibility_score(tour, request)
+        score += time_score
+        
+        # 5. User Feedback Score (0-15 points)
+        feedback_score = self._get_feedback_score(tour, request)
+        score += feedback_score
+        
+        # 6. Popularity/Quality Indicators (bonus points)
+        # Add bonus for tours with good indicators (this could be expanded)
+        if tour.get('rating', 0) > 4.0:
+            score += 5
+        
+        return min(score, 100.0)  # Cap at 100
+
+    def _get_weather_compatibility_score(self, tour: Dict, request: SmartRecommendationRequest) -> float:
+        """Calculate weather compatibility score (0-15 points)"""
+        tour_type = tour.get('tour_type', '')
+        
+        # Try to get weather from the request context
+        # This would be populated by the _derive_context method
+        weather_condition = None
+        if hasattr(request, '_weather_context'):
+            weather_condition = request._weather_context.get('condition')
+        
+        # If no weather data, use default scoring
+        if not weather_condition:
+            if tour_type == 'indoor':
+                return 10  # Good for any weather
+            elif tour_type == 'outdoor':
+                return 8   # Good for good weather
+            elif tour_type == 'both':
+                return 12  # Flexible for any weather
+            return 5
+        
+        # Score based on actual weather condition
+        if weather_condition == "Rain":
+            if tour_type == 'indoor':
+                return 15  # Perfect for rainy weather
+            elif tour_type == 'both':
+                return 12  # Good option
+            else:
+                return 5   # Not ideal for rain
+        elif weather_condition in ["Clear", "Clouds"]:
+            if tour_type == 'outdoor':
+                return 15  # Perfect for good weather
+            elif tour_type == 'both':
+                return 12  # Good option
+            else:
+                return 8   # Indoor is fine but not optimal
+        else:
+            # For other weather conditions, use balanced scoring
+            if tour_type == 'both':
+                return 12  # Most flexible
+            elif tour_type == 'indoor':
+                return 10  # Safe choice
+            else:
+                return 8   # Outdoor might be affected
+
+    def _get_time_compatibility_score(self, tour: Dict, request: SmartRecommendationRequest) -> float:
+        """Calculate time of day compatibility score (0-15 points)"""
+        # Derive time of day from request
+        hour = request.local_datetime.hour
+        if 5 <= hour < 12:
+            current_time = "morning"
+        elif 12 <= hour < 17:
+            current_time = "afternoon"
+        elif 17 <= hour < 21:
+            current_time = "evening"
+        else:
+            current_time = "night"
+        
+        # Check if tour is suitable for current time
+        time_of_day_types = tour.get('time_of_day_trip_type', [])
+        if current_time in time_of_day_types:
+            return 15
+        elif any(time_type in time_of_day_types for time_type in ['morning', 'afternoon', 'evening', 'night']):
+            return 10
+        else:
+            return 5
+
+    def _get_feedback_score(self, tour: Dict, request: SmartRecommendationRequest) -> float:
+        """Calculate score based on user feedback (0-15 points)"""
+        score = 0
+        
+        if request.feedback:
+            tour_id = tour.get('id')
+            
+            # Penalty for disliked tours
+            if request.feedback.disliked_tours and tour_id in request.feedback.disliked_tours:
+                return -50  # Heavy penalty for disliked tours
+            
+            # Bonus for similar tours to liked ones
+            if request.feedback.liked_tours:
+                # Check if this tour is similar to liked tours
+                liked_tour_categories = set()
+                liked_tour_types = set()
+                
+                # This would ideally query the database for liked tour details
+                # For now, we'll use a simplified approach
+                if tour.get('category_name') in liked_tour_categories:
+                    score += 10
+                if tour.get('tour_type') in liked_tour_types:
+                    score += 5
+        
+        return score
 
     def _get_weather_filter(self, weather_condition: str) -> Optional[str]:
         if weather_condition == "Rain":
@@ -541,54 +766,18 @@ class RecommendationService:
 
     async def _generate_recommendation_reason(self, tour: dict, request: SmartRecommendationRequest, context: dict) -> str:
         """Uses GPT to generate a personalized reason for the recommendation."""
-        if not self.openai_client:
-            return "Recommended based on your preferences and current context."
-
-        user_context_parts = []
-        if request.lat is not None and request.lon is not None:
-            user_context_parts.append(f"- Location: Near latitude {request.lat}, longitude {request.lon}")
+        # Convert request to serializable dict for caching
+        request_data = {
+            'lat': request.lat,
+            'lon': request.lon,
+            'local_datetime': request.local_datetime.strftime('%A, %Y-%m-%d %H:%M:%S'),
+            'preferences': request.preferences.dict() if request.preferences else None
+        }
         
-        user_context_parts.append(f"- Time: It's currently {context['time_of_day']} on {request.local_datetime.strftime('%A')}.")
-
-        if context.get('weather'):
-            user_context_parts.append(f"- Weather: The weather is {context['weather']['condition']} at {context['weather']['temperature_celsius']}°C.")
-
-        if request.preferences:
-            user_context_parts.append(f"- Preferences: {request.preferences.dict()}.")
-
-        user_context_str = "\n".join(user_context_parts)
-
-        prompt = f"""
-        Generate a very short, compelling reason (maximum 2 lines, ideally 1-2 sentences) why this tour is recommended for the user.
-
-        User's Context:
-        {user_context_str}
-
-        Tour Details:
-        - Name: {tour['name']}
-        - Category: {tour['category_name']}
-        - Type: {tour['tour_type']}
-        - Price Range: {tour['pricing_range_usd']}
-        - Summary: Best for {', '.join(tour['group_type_suitability'])} during {', '.join(tour['time_of_day_trip_type'])}.
-
-        Requirements:
-        - Keep it to maximum 2 lines
-        - Be concise and direct
-        - Focus on the most relevant factor (weather, location, time, or preferences)
-        - Make it personal and engaging
-
-        Example: "Perfect for this sunny afternoon! This outdoor tour is just minutes away and matches your preferences."
-        """
-        
-        try:
-            chat_completion = await self.openai_client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model="gpt-4.1-mini",
-                temperature=0.7,
-                max_tokens=80,
-            )
-            reason = chat_completion.choices[0].message.content.strip()
-            return reason
-        except Exception as e:
-            logger.error(f"Error generating recommendation reason from OpenAI: {e}")
-            return "This tour is a great fit based on your location and preferences." 
+        # Use the cached function
+        return await _generate_recommendation_reason_cached(
+            tour, 
+            request_data, 
+            context, 
+            settings.openai_api_key or ""
+        ) 

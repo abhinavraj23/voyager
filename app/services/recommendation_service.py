@@ -304,12 +304,12 @@ class RecommendationService:
         base_query = "SELECT id FROM tour_info WHERE 1=1"
         
         # --- Query 1: Strict search with all filters and 20km radius ---
-        logger.info("Attempt 1: Strict search with all filters and 20km radius.")
+        logger.info("Attempt 1: Strict search with all filters and 10km radius.")
         conditions_1 = []
         params_1: Dict[str, Any] = {}
 
         if request.lat is not None and request.lon is not None:
-            conditions_1.append(f"({self._build_distance_query(request.lat, request.lon, 20)})")
+            conditions_1.append(f"({self._build_distance_query(request.lat, request.lon, 10)})")
         
         if context.get('weather'):
             weather_filter = self._get_weather_filter(context['weather']['condition'])
@@ -340,12 +340,12 @@ class RecommendationService:
             logger.error(f"Error on attempt 1: {e}", exc_info=True)
 
         # --- Query 2: Fallback with 100km radius and other filters ---
-        logger.info("Attempt 2: Fallback with 100km radius.")
+        logger.info("Attempt 2: Fallback with 30km radius.")
         if request.lat is not None and request.lon is not None:
             conditions_2 = []
             params_2: Dict[str, Any] = {}
 
-            conditions_2.append(f"({self._build_distance_query(request.lat, request.lon, 100)})")
+            conditions_2.append(f"({self._build_distance_query(request.lat, request.lon, 30)})")
             
             if context.get('weather'):
                 weather_filter = self._get_weather_filter(context['weather']['condition'])
@@ -377,7 +377,7 @@ class RecommendationService:
         logger.info("Attempt 3: Final fallback with 20km radius only.")
         if request.lat is not None and request.lon is not None:
             try:
-                query_3 = f"{base_query} AND ({self._build_distance_query(request.lat, request.lon, 20)})"
+                query_3 = f"{base_query} AND ({self._build_distance_query(request.lat, request.lon, 10)})"
                 logger.info(f"Executing query 3: {query_3}")
                 result_3 = self.client.execute(query_3)
                 if result_3:

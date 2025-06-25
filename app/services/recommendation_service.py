@@ -12,6 +12,9 @@ from app.utils.cache import cached
 
 logger = logging.getLogger(__name__)
 
+# Global counter for cycling through top tours
+_tour_selection_counter = 0
+
 @cached(ttl=1800, key_prefix="openai_recommendation_reason")
 async def _generate_recommendation_reason_cached(tour: dict, request_data: dict, context: dict, openai_api_key: str) -> str:
     """Cached function for generating recommendation reasons"""
@@ -453,9 +456,11 @@ class RecommendationService:
 
     async def _rank_and_select_tours(self, tour_ids: List[int], request: SmartRecommendationRequest) -> List[Dict]:
         """
-        Ranks tours based on multiple factors, gets top 3, then randomly selects from them
-        to add variety while maintaining quality.
+        Ranks tours based on multiple factors, gets top 5, then cycles through them sequentially
+        based on API call count to ensure fair distribution.
         """
+        global _tour_selection_counter
+        
         if not tour_ids:
             return []
 
@@ -487,17 +492,26 @@ class RecommendationService:
         # Sort by score (highest first)
         ranked_tours.sort(key=lambda x: x[1], reverse=True)
         
-        # Get top 3 ranked tours
+        # Get top 5 ranked tours
         top_5_tours = [tour for tour, score in ranked_tours[:5]]
         
-        logger.info(f"Ranked {len(tours)} tours, top 3 scores: {[score for _, score in ranked_tours[:3]]}")
+        logger.info(f"Ranked {len(tours)} tours, top 5 scores: {[score for _, score in ranked_tours[:5]]}")
         
-        # Randomly select from top 3 to add variety
-        import random
-        selected_tours = random.sample(top_5_tours, min(len(top_5_tours), request.limit))
+        # Cycle through top 5 tours sequentially
+        if not top_5_tours:
+            return []
         
-        logger.info(f"Randomly selected {len(selected_tours)} tours from top 3 ranked tours")
-        return selected_tours
+        # Calculate which tour to select based on counter
+        tour_index = _tour_selection_counter % len(top_5_tours)
+        selected_tour = top_5_tours[tour_index]
+        
+        # Increment counter for next call
+        _tour_selection_counter += 1
+        
+        logger.info(f"Selected tour {tour_index + 1} of {len(top_5_tours)} (counter: {_tour_selection_counter})")
+        
+        # Return list with selected tour(s) - can be expanded if multiple tours needed
+        return [selected_tour]
 
     def _calculate_tour_score(self, tour: Dict, request: SmartRecommendationRequest) -> float:
         """
